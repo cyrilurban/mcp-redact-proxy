@@ -2,14 +2,14 @@
 
 A tiny stdio proxy that sits between an MCP client (Claude Code, Cursor, VS Code extension, …) and any MCP server, and **redacts PII / secrets** from tool-call responses before they ever reach the LLM.
 
-Built for Qest's GDPR concern when wiring Claude Code into production Grafana/Loki queries. Written as defense-in-depth — the real fix is to never log PII in the first place (`pino.redact` + field whitelist), but until every service is audited this proxy gives the team a safety net.
+Built out of a GDPR concern when wiring Claude Code into production Grafana/Loki queries. Written as defense-in-depth — the real fix is to never log PII in the first place (`pino.redact` + field whitelist at the logger), but until every service is audited this proxy gives you a safety net.
 
 ## Why another gateway?
 
-We evaluated [lasso-security/mcp-gateway](https://github.com/lasso-security/mcp-gateway) and it had two blockers for our use case:
+We evaluated [lasso-security/mcp-gateway](https://github.com/lasso-security/mcp-gateway) and it had two blockers:
 
 1. It builds dynamic Python functions from the inner MCP's tool schema, which crashes on tools with reserved words (`for` in Prometheus alerting) or hyphens (`filter-query` in Tempo search) in parameter names.
-2. The Presidio plugin is English-only out of the box and doesn't know about our domain identifiers (PUDO IDs, Cognito subs, Worldline auth codes, partner `x-api-key`s).
+2. The Presidio plugin is English-only out of the box and doesn't know about domain-specific identifiers we cared about.
 
 So this is ~200 lines of TypeScript doing exactly one thing: pipe JSON-RPC through, regex-redact the `tools/call` response payloads, nothing else.
 
@@ -29,9 +29,7 @@ So this is ~200 lines of TypeScript doing exactly one thing: pipe JSON-RPC throu
 | `worldline-auth-code` | `Authorization code: (00)510096`                       | `Authorization code: (00)XXXXXX`   |
 | `hex-crypto`          | ARQC, AID (hex blobs 12+ chars with at least one A-F) | `<HEX_CRYPTO>`                     |
 
-> **Note on DPD business identifiers.** 14-digit parcel numbers and PUDO ids (`CZ12345`, …) are intentionally **not** redacted. On their own they are not personal data, and devs need them to correlate a log line with a concrete shipment or pickup point when debugging.
-
-Hash-based rules use a deterministic SHA-256 truncated to 6 hex chars, so the same email / uuid / partner id always produces the same token **within one process run**. This lets the LLM still correlate events ("same user triggered the error 7×") without ever seeing the real identifier.
+Hash-based rules use a deterministic SHA-256 truncated to 6 hex chars, so the same email / uuid always produces the same token **within one process run**. This lets the LLM still correlate events ("same user triggered the error 7×") without ever seeing the real identifier.
 
 ## Install
 
@@ -61,7 +59,7 @@ In `~/.claude.json` replace your existing entry:
       "command": "mcp-redact-proxy",
       "args": ["--", "uvx", "mcp-grafana"],
       "env": {
-        "GRAFANA_URL": "https://dpdcz.grafana.net",
+        "GRAFANA_URL": "https://your-org.grafana.net",
         "GRAFANA_SERVICE_ACCOUNT_TOKEN": "glsa_..."
       }
     }
@@ -76,7 +74,7 @@ Environment variables are inherited by the inner command, so put credentials the
 On every redacted tool call the proxy writes a one-line stats report to its stderr:
 
 ```
-[mcp-redact-proxy] tool=query_loki_logs redacted=10 by={"api-key-header":2,"email":2,"uuid":4,"pudo-id":2}
+[mcp-redact-proxy] tool=query_loki_logs redacted=8 by={"api-key-header":2,"email":2,"uuid":4}
 ```
 
 If you see zero redactions on a response you expect to contain PII, tighten the rules.
@@ -117,4 +115,4 @@ yarn dev -- uvx mcp-grafana  # run against a real MCP
 
 ## License
 
-MIT © Qest
+MIT
