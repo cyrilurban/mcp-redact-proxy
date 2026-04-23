@@ -53,15 +53,12 @@ describe("redactText — individual rules", () => {
     expect(tokens![0]).not.toBe(tokens![1]);
   });
 
-  it("redacts PUDO IDs for CZ/SK/PL/HU with correlation-preserving hash", () => {
-    const out = redactText(
-      "CZ47227 sends for CZ21313, not for CZ47227; SK12345 separate; PL99999",
-      DEFAULT_RULES,
-    );
-    const pudos = out.match(/<PUDO_[a-f0-9]{6}>/g)!;
-    expect(pudos).toHaveLength(5);
-    expect(pudos[0]).toBe(pudos[2]); // CZ47227 appears twice
-    expect(pudos[0]).not.toBe(pudos[1]); // CZ47227 ≠ CZ21313
+  it("does NOT redact PUDO IDs — devs need them for debugging", () => {
+    const input =
+      "CZ47227 sends for CZ21313, not for CZ47227; SK12345 separate; PL99999";
+    const out = redactText(input, DEFAULT_RULES);
+    expect(out).toBe(input);
+    expect(out).not.toContain("<PUDO");
   });
 
   it("redacts Czech phone numbers in several forms", () => {
@@ -197,19 +194,19 @@ describe("real-world log line from DPD My Pickup production", () => {
 
     expect(out).not.toContain("hieucz123@gmail.com");
     expect(out).not.toContain("a7cdcfcb-3a7e-4e23-868a-43edeedbe15b");
-    expect(out).not.toContain("CZ37907");
     expect(out).not.toContain("mYy0Lp2pMU21jYI1EFJl6PbPxjHMuQ23");
 
-    // But keep structural / non-sensitive fields readable
+    // But keep structural / non-sensitive fields readable — including
+    // business identifiers like PUDO id and parcel no that devs need.
     expect(out).toContain("GraphQL response");
     expect(out).toContain("Something went wrong");
     expect(out).toContain("User-Agent");
     expect(out).toContain("axios/0.27.2");
     expect(out).toContain('"status":405');
+    expect(out).toContain("CZ37907"); // PUDO id stays visible
 
     expect(stats.byRule.email).toBeGreaterThanOrEqual(1);
     expect(stats.byRule.uuid).toBeGreaterThanOrEqual(1);
-    expect(stats.byRule["pudo-id"]).toBeGreaterThanOrEqual(1);
     expect(stats.byRule["api-key-header"]).toBeGreaterThanOrEqual(1);
   });
 });

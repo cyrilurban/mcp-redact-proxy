@@ -113,16 +113,9 @@ export const DEFAULT_RULES: readonly RedactionRule[] = [
     replace: "<HEX_CRYPTO>",
   },
 
-  // DPD domain identifiers — hash so correlation still works.
-  //
-  // Note: 14-digit parcel numbers are intentionally NOT redacted. They are not
-  // personal data on their own and are the primary key devs need to correlate
-  // a log line with a concrete shipment when debugging. If that changes (e.g.
-  // parcel numbers are ever combined with recipient address in a single log
-  // line), reconsider.
-  {
-    name: "pudo-id",
-    pattern: /\b(?:CZ|SK|PL|HU)\d{5}\b/g,
-    replace: hashReplacer("PUDO"),
-  },
+  // Note: DPD business identifiers (14-digit parcel numbers, PUDO ids like
+  // CZ12345) are intentionally NOT redacted. On their own they are not
+  // personal data and devs need them to correlate a log line with a concrete
+  // shipment or pickup point when debugging. Revisit only if a future log
+  // format combines them with recipient name/address on a single line.
 ];
