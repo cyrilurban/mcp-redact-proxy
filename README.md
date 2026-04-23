@@ -28,8 +28,9 @@ So this is ~200 lines of TypeScript doing exactly one thing: pipe JSON-RPC throu
 | `card-pan`            | Formatted PAN `1234-5678-9012-3456`                    | `<CARD_PAN>`                       |
 | `worldline-auth-code` | `Authorization code: (00)510096`                       | `Authorization code: (00)XXXXXX`   |
 | `hex-crypto`          | ARQC, AID (hex blobs 12+ chars with at least one A-F) | `<HEX_CRYPTO>`                     |
-| `parcel-no`           | 14-digit DPD parcel numbers                            | `<PARCEL_abc123>` (hash)           |
 | `pudo-id`             | `CZ12345`, `SK12345`, `PL12345`, `HU12345`             | `<PUDO_abc123>` (hash)             |
+
+> **Note on parcel numbers.** 14-digit DPD parcel numbers are intentionally **not** redacted. They are not personal data on their own and devs need them to correlate a log line with a concrete shipment when debugging.
 
 Hash-based rules use a deterministic SHA-256 truncated to 6 hex chars, so the same email / uuid / partner id always produces the same token **within one process run**. This lets the LLM still correlate events ("same user triggered the error 7×") without ever seeing the real identifier.
 

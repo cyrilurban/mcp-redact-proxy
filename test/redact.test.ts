@@ -109,15 +109,14 @@ describe("redactText — individual rules", () => {
     );
   });
 
-  it("redacts parcel numbers as correlation-preserving hash", () => {
+  it("does NOT redact parcel numbers — devs need them for debugging", () => {
     const out = redactText(
       "parcelNo 13845140149749 and again 13845140149749 but not 23655041587090",
       DEFAULT_RULES,
     );
-    const tokens = out.match(/<PARCEL_[a-f0-9]{6}>/g)!;
-    expect(tokens).toHaveLength(3);
-    expect(tokens[0]).toBe(tokens[1]); // same parcel
-    expect(tokens[0]).not.toBe(tokens[2]); // different parcel
+    expect(out).toContain("13845140149749");
+    expect(out).toContain("23655041587090");
+    expect(out).not.toContain("<PARCEL");
   });
 
   it("leaves non-matching text untouched", () => {
