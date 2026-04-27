@@ -15,21 +15,35 @@ So this is ~200 lines of TypeScript doing exactly one thing: pipe JSON-RPC throu
 
 ## What it redacts by default
 
-| Rule                  | Catches                                                | Replacement                        |
-| --------------------- | ------------------------------------------------------ | ---------------------------------- |
-| `api-key-header`      | `x-api-key`, `authorization`, `bearer`, `secret`, `password` values (incl. escaped JSON) | `<REDACTED_SECRET>`   |
-| `jwt`                 | `eyJ...` JSON Web Tokens                               | `<JWT>`                            |
-| `grafana-sa-token`    | `glsa_...` Grafana service account tokens             | `<GRAFANA_SA_TOKEN>`               |
-| `email`               | `user@domain.tld`                                      | `<EMAIL_abc123>` (SHA-256 hash)    |
-| `uuid`                | RFC 4122 UUIDs (Cognito sub, request ids)              | `<UUID_abc123>` (SHA-256 hash)     |
-| `phone-cz` / `-sk`    | `+420…`, `+421…` numbers                               | `<PHONE_CZ>` / `<PHONE_SK>`        |
-| `phone-intl`          | `+CC...` other international numbers                  | `<PHONE>`                          |
-| `card-last4-masked`   | `Visa **** **** **** 1234` strings                    | `<CARD_****_****_****_XXXX>`       |
-| `card-pan`            | Formatted PAN `1234-5678-9012-3456`                    | `<CARD_PAN>`                       |
-| `worldline-auth-code` | `Authorization code: (00)510096`                       | `Authorization code: (00)XXXXXX`   |
-| `hex-crypto`          | ARQC, AID (hex blobs 12+ chars with at least one A-F) | `<HEX_CRYPTO>`                     |
+There are two kinds of rule:
 
-Hash-based rules use a deterministic SHA-256 truncated to 6 hex chars, so the same email / uuid always produces the same token **within one process run**. This lets the LLM still correlate events ("same user triggered the error 7×") without ever seeing the real identifier.
+- **String-pattern rules** (regex) — fire on every string leaf. Use for self-identifying values like emails, JWTs, IBANs.
+- **Field-aware rules** — fire when a JSON property's *key* matches. Use for values that look like ordinary strings on their own (a name, a street) and only need redacting because of the surrounding key.
+
+| Rule                  | Kind   | Catches                                                | Replacement                        |
+| --------------------- | ------ | ------------------------------------------------------ | ---------------------------------- |
+| `api-key-header`      | string | `x-api-key`, `authorization`, `bearer`, `secret`, `password` values (incl. escaped JSON) | `<REDACTED_SECRET>`   |
+| `jwt`                 | string | `eyJ...` JSON Web Tokens                               | `<JWT>`                            |
+| `grafana-sa-token`    | string | `glsa_...` Grafana service account tokens             | `<GRAFANA_SA_TOKEN>`               |
+| `email`               | string | `user@domain.tld`                                      | `<EMAIL_abc123>` (SHA-256 hash)    |
+| `uuid`                | string | RFC 4122 UUIDs (Cognito sub, request ids)              | `<UUID_abc123>` (SHA-256 hash)     |
+| `phone-cz` / `-sk`    | string | `+420…`, `+421…` numbers                               | `<PHONE_CZ>` / `<PHONE_SK>`        |
+| `phone-intl`          | string | `+CC...` other international numbers                  | `<PHONE>`                          |
+| `iban`                | string | ISO 13616 IBANs (`CZ65 0800…`, `DE89 3704…`)           | `<IBAN_abc123>`                    |
+| `cz-bank-account`     | string | Czech bank accounts (`19-1234567890/0100`)             | `<BANK_ACCT_abc123>`               |
+| `card-last4-masked`   | string | `Visa **** **** **** 1234` strings                    | `<CARD_****_****_****_XXXX>`       |
+| `card-pan`            | string | Formatted PAN `1234-5678-9012-3456`                    | `<CARD_PAN>`                       |
+| `worldline-auth-code` | string | `Authorization code: (00)510096`                       | `Authorization code: (00)XXXXXX`   |
+| `hex-crypto`          | string | ARQC, AID (hex blobs 12+ chars with at least one A-F) | `<HEX_CRYPTO>`                     |
+| `name-field`          | field  | Keys: `name`, `contactName`, `name2`, `company`, `owner`, `editPerson`, `author`, `pickupPointName` | `<NAME_abc123>` (SHA-256 hash) |
+| `address-field`       | field  | Keys: `street`, `city`, `zipCode`, `building`, `floor`, `department`, `delivery`, `address` | `<ADDR_abc123>`        |
+| `bank-field`          | field  | Keys: `iban`, `bic`, `bankAccount`, `bankCode`, `bankName`, `variableSymbol` | `<BANK_abc123>`             |
+
+Hash-based rules use a deterministic SHA-256 truncated to 6 hex chars, so the same email / uuid / name always produces the same token **within one process run**. This lets the LLM still correlate events ("same user triggered the error 7×") without ever seeing the real identifier.
+
+### MCP envelope handling
+
+Most MCP tools wrap their result inside `content: [{type: "text", text: "<stringified JSON>"}]`. Plain string-leaf walking can't see the keys inside that string, so field rules would miss everything. The proxy detects JSON text blocks, parses them, runs full field-aware redaction over the parsed value, and re-serialises — so `bankAccount` and `street` get scrubbed even though they live inside a wrapper string.
 
 ## Install
 

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { redactText, redactJson, makeStats } from "../src/redact.ts";
+import {
+  makeStats,
+  redactJson,
+  redactMcpToolResult,
+  redactText,
+} from "../src/redact.ts";
 import { DEFAULT_RULES } from "../src/rules.ts";
 
 describe("redactText — individual rules", () => {
@@ -116,6 +121,29 @@ describe("redactText — individual rules", () => {
     expect(out).not.toContain("<PARCEL");
   });
 
+  it("redacts IBAN with consistent hash, both spaced and compact", () => {
+    const stats = makeStats();
+    const out = redactText(
+      "primary CZ65 0800 0000 1920 0014 5399 same CZ6508000000192000145399 other DE89 3704 0044 0532 0130 00",
+      DEFAULT_RULES,
+      stats,
+    );
+    const tokens = out.match(/<IBAN_[a-f0-9]{6}>/g);
+    expect(tokens).toHaveLength(3);
+    expect(out).not.toMatch(/CZ65|DE89/);
+    expect(stats.byRule.iban).toBe(3);
+  });
+
+  it("redacts Czech bank account numbers (with and without prefix)", () => {
+    const out = redactText(
+      "ucet 19-1234567890/0100 a 670100-2210123456/6210",
+      DEFAULT_RULES,
+    );
+    const tokens = out.match(/<BANK_ACCT_[a-f0-9]{6}>/g);
+    expect(tokens).toHaveLength(2);
+    expect(out).not.toContain("1234567890");
+  });
+
   it("leaves non-matching text untouched", () => {
     const input =
       "GraphQL response status=ok level=info duration=123ms count=42";
@@ -150,6 +178,208 @@ describe("redactJson — structural recursion", () => {
     const input = { email: "test@example.com" };
     redactJson(input, DEFAULT_RULES);
     expect(input.email).toBe("test@example.com");
+  });
+
+  it("field rules redact names, addresses and bank fields by key", () => {
+    const input = {
+      info: {
+        receiver: {
+          name: "VF International Sagl",
+          contactName: "Veronika Froncová",
+          contactEmail: "v.froncova@example.com",
+          contactPhone: "+420 284 089 355",
+          street: "Ke Zdibsku 193",
+          city: "Zdiby",
+          zipCode: "25066",
+          country: "203", // ISO numeric — must NOT be redacted
+          pudoId: "CZ47227", // PUDO id — must NOT be redacted
+        },
+        courierTour: {
+          courier: { name: "Jiří Nesvarba", phoneNumber: "+420 704 640 029" },
+          deduplicationKey: "2371-708-2026-02-17",
+        },
+        parcelNumber: "23715032074790", // must NOT be redacted
+        status: "Delivered", // must NOT be redacted (not in field list)
+      },
+      cod: {
+        amount: 1500,
+        currency: "CZK",
+        bankAccount: "1234567890",
+        bankCode: "0100",
+        bankName: "Komerční banka",
+        iban: "CZ6508000000192000145399",
+        variableSymbol: "987654321",
+      },
+    };
+
+    const stats = makeStats();
+    const out = redactJson(input, DEFAULT_RULES, stats) as typeof input;
+
+    // Names hashed
+    expect(out.info.receiver.name).toMatch(/^<NAME_[a-f0-9]{6}>$/);
+    expect(out.info.receiver.contactName).toMatch(/^<NAME_[a-f0-9]{6}>$/);
+    // courier subtree → all string leaves hashed by name-field
+    expect(out.info.courierTour.courier.name).toMatch(/^<NAME_[a-f0-9]{6}>$/);
+
+    // Addresses hashed
+    expect(out.info.receiver.street).toMatch(/^<ADDR_[a-f0-9]{6}>$/);
+    expect(out.info.receiver.city).toMatch(/^<ADDR_[a-f0-9]{6}>$/);
+    expect(out.info.receiver.zipCode).toMatch(/^<ADDR_[a-f0-9]{6}>$/);
+
+    // Banking hashed
+    expect(out.cod.bankAccount).toMatch(/^<BANK_[a-f0-9]{6}>$/);
+    expect(out.cod.bankCode).toMatch(/^<BANK_[a-f0-9]{6}>$/);
+    expect(out.cod.bankName).toMatch(/^<BANK_[a-f0-9]{6}>$/);
+    expect(out.cod.iban).toMatch(/^<BANK_[a-f0-9]{6}>$/);
+    expect(out.cod.variableSymbol).toMatch(/^<BANK_[a-f0-9]{6}>$/);
+
+    // Email still hit by string rule (no field rule for contactEmail).
+    expect(out.info.receiver.contactEmail).toMatch(/^<EMAIL_[a-f0-9]{6}>$/);
+    // Phones hit by phone-field rule (fires before string rule), giving the
+    // generic <PHONE> marker rather than the locale-specific <PHONE_CZ>.
+    expect(out.info.receiver.contactPhone).toBe("<PHONE>");
+    expect(out.info.courierTour.courier.phoneNumber).toBe("<PHONE>");
+
+    // Business identifiers preserved
+    expect(out.info.parcelNumber).toBe("23715032074790");
+    expect(out.info.status).toBe("Delivered");
+    expect(out.info.receiver.country).toBe("203");
+    expect(out.info.receiver.pudoId).toBe("CZ47227");
+    expect(out.info.courierTour.deduplicationKey).toBe("2371-708-2026-02-17");
+    expect(out.cod.amount).toBe(1500);
+    expect(out.cod.currency).toBe("CZK");
+  });
+
+  it("redacts BIC values via the bank-field key rule (no standalone BIC pattern)", () => {
+    const out = redactJson(
+      { cod: { bic: "GIBACZPX", currency: "CZK" } },
+      DEFAULT_RULES,
+    ) as { cod: { bic: string; currency: string } };
+    expect(out.cod.bic).toMatch(/^<BANK_[a-f0-9]{6}>$/);
+    expect(out.cod.currency).toBe("CZK");
+  });
+
+  it("path rule redacts KeyValueItem `value` while keeping `key` visible", () => {
+    const input = {
+      events: [
+        {
+          name: "scan",
+          additionalInfo: [
+            { key: "receiver_name", value: "Nikola Hladek" },
+            { key: "cod_amount", value: "1783" },
+            { key: "sender_name", value: "H&M Online" },
+          ],
+        },
+      ],
+    };
+    const stats = makeStats();
+    const out = redactJson(input, DEFAULT_RULES, stats) as typeof input;
+    const ai = out.events[0].additionalInfo;
+    // keys remain visible for correlation
+    expect(ai[0].key).toBe("receiver_name");
+    expect(ai[1].key).toBe("cod_amount");
+    expect(ai[2].key).toBe("sender_name");
+    // values are hashed — even the benign 1783, by design (path-based, not key-aware)
+    expect(ai[0].value).toMatch(/^<META_[a-f0-9]{6}>$/);
+    expect(ai[1].value).toMatch(/^<META_[a-f0-9]{6}>$/);
+    expect(ai[2].value).toMatch(/^<META_[a-f0-9]{6}>$/);
+    // identical PII → identical hash
+    expect(ai[0].value).not.toBe(ai[1].value);
+    expect(stats.byRule["key-value-item-value"]).toBe(3);
+  });
+
+  it("message-field rule redacts SMS / email content bodies", () => {
+    const input = {
+      notifications: [
+        {
+          content: "Balík je připravený v AlzaBox Jihlava, Pelhřimovská 70.",
+          emailTemplate: "PUDO_READY_v3",
+          purpose: "PICKUP_READY",
+        },
+      ],
+      conversations: [{ text: "Jsem před domem, prosím sejděte" }],
+      events: [{ note: "Volat zákazníka Nikolu Hladkovou", asCode: "P1" }],
+    };
+    const out = redactJson(input, DEFAULT_RULES) as typeof input;
+    expect(out.notifications[0].content).toMatch(/^<MSG_[a-f0-9]{6}>$/);
+    expect(out.notifications[0].emailTemplate).toMatch(/^<MSG_[a-f0-9]{6}>$/);
+    expect(out.notifications[0].purpose).toBe("PICKUP_READY"); // not in rule
+    expect(out.conversations[0].text).toMatch(/^<MSG_[a-f0-9]{6}>$/);
+    expect(out.events[0].note).toMatch(/^<MSG_[a-f0-9]{6}>$/);
+    expect(out.events[0].asCode).toBe("P1"); // not in rule
+  });
+
+  it("phone-field rule redacts bare phone numbers without an international prefix", () => {
+    const out = redactJson(
+      {
+        carrier: { phoneNumber: "722 044 240" },
+        receiverPhone: "605123456",
+        contactPhone: "+420 284 089 355",
+      },
+      DEFAULT_RULES,
+    ) as { carrier: { phoneNumber: string }; receiverPhone: string; contactPhone: string };
+    expect(out.carrier.phoneNumber).toBe("<PHONE>");
+    expect(out.receiverPhone).toBe("<PHONE>");
+    expect(out.contactPhone).toBe("<PHONE>");
+  });
+
+  it("identical values inside a field rule produce identical hashes", () => {
+    const input = {
+      a: { contactName: "Veronika Froncová" },
+      b: { contactName: "Veronika Froncová" },
+      c: { contactName: "Někdo Jiný" },
+    };
+    const out = redactJson(input, DEFAULT_RULES) as typeof input;
+    expect(out.a.contactName).toBe(out.b.contactName);
+    expect(out.a.contactName).not.toBe(out.c.contactName);
+  });
+});
+
+describe("redactMcpToolResult — MCP envelope handling", () => {
+  it("parses JSON text content so field rules can fire on the structured payload", () => {
+    const innerData = {
+      info: {
+        receiver: { name: "VF International", street: "Ke Zdibsku 193" },
+        parcelNumber: "23715032074790",
+      },
+    };
+    const envelope = {
+      content: [{ type: "text", text: JSON.stringify(innerData) }],
+    };
+    const stats = makeStats();
+    const out = redactMcpToolResult(envelope, DEFAULT_RULES, stats) as {
+      content: { type: string; text: string }[];
+    };
+    const redacted = JSON.parse(out.content[0].text);
+    expect(redacted.info.receiver.name).toMatch(/^<NAME_[a-f0-9]{6}>$/);
+    expect(redacted.info.receiver.street).toMatch(/^<ADDR_[a-f0-9]{6}>$/);
+    expect(redacted.info.parcelNumber).toBe("23715032074790");
+    expect(stats.byRule["name-field"]).toBeGreaterThanOrEqual(1);
+    expect(stats.byRule["address-field"]).toBeGreaterThanOrEqual(1);
+  });
+
+  it("falls back to string redaction when text content is not JSON", () => {
+    const envelope = {
+      content: [{ type: "text", text: "user@example.com sent a request" }],
+    };
+    const out = redactMcpToolResult(envelope, DEFAULT_RULES) as {
+      content: { type: string; text: string }[];
+    };
+    expect(out.content[0].text).toMatch(/<EMAIL_[a-f0-9]{6}> sent a request/);
+  });
+
+  it("preserves non-text content blocks (images / resources)", () => {
+    const envelope = {
+      content: [
+        { type: "image", data: "iVBORw0KG…", mimeType: "image/png" },
+        { type: "text", text: "ok" },
+      ],
+    };
+    const out = redactMcpToolResult(envelope, DEFAULT_RULES) as {
+      content: { type: string; data?: string; text?: string }[];
+    };
+    expect(out.content[0]).toMatchObject({ type: "image" });
+    expect(out.content[1]).toMatchObject({ type: "text", text: "ok" });
   });
 });
 

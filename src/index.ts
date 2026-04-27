@@ -23,7 +23,7 @@
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { DEFAULT_RULES } from "./rules.js";
-import { redactJson, makeStats } from "./redact.js";
+import { makeStats, redactMcpToolResult } from "./redact.js";
 
 const argv = process.argv.slice(2);
 const sepIdx = argv.indexOf("--");
@@ -106,7 +106,7 @@ stdoutRl.on("line", (line: string) => {
       pendingToolCalls.delete(msg.id);
 
       const stats = makeStats();
-      msg.result = redactJson(msg.result, rules, stats);
+      msg.result = redactMcpToolResult(msg.result, rules, stats);
 
       if (stats.totalMatches > 0) {
         process.stderr.write(
