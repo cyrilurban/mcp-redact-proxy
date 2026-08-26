@@ -1,129 +1,158 @@
 #!/usr/bin/env node
-/**
- * mcp-redact-proxy — a transparent stdio proxy for MCP servers.
- *
- * Usage:
- *   mcp-redact-proxy -- <inner-mcp-cmd> [args...]
- *
- * Example: wrap mcp-grafana with Loki-log redaction enabled.
- *   mcp-redact-proxy -- uvx mcp-grafana
- *
- * The proxy:
- *   1. Spawns the inner MCP server as a child process.
- *   2. Forwards every JSON-RPC line from our stdin to the child's stdin
- *      unchanged (no redaction on requests — the LLM's queries are not PII).
- *   3. Intercepts `tools/call` responses from the child and runs the
- *      redaction pipeline on the `result` payload before writing it to our
- *      stdout, where the MCP client (Claude) reads it.
- *
- * All non-`tools/call` traffic (initialize, tools/list, resource ops, …) is
- * passed through untouched so the MCP handshake and tool schema are
- * preserved exactly.
- */
 import { spawn } from "node:child_process";
 import readline from "node:readline";
+import { createHttpProxyServer } from "./http-proxy.js";
 import { DEFAULT_RULES } from "./rules.js";
 import { makeStats, redactMcpToolResult } from "./redact.js";
 
-const argv = process.argv.slice(2);
-const sepIdx = argv.indexOf("--");
-if (sepIdx < 0 || sepIdx === argv.length - 1) {
-  process.stderr.write(
-    "usage: mcp-redact-proxy [options] -- <inner-mcp-cmd> [args...]\n",
-  );
-  process.exit(2);
-}
-const innerArgv = argv.slice(sepIdx + 1);
-const [cmd, ...cmdArgs] = innerArgv;
-if (!cmd) {
-  process.stderr.write("error: no inner command specified after --\n");
-  process.exit(2);
-}
-
-const rules = DEFAULT_RULES;
-
-// Spawn the inner MCP server. stdin/stdout are piped, stderr inherited so the
-// user sees the child's diagnostic output interleaved with ours.
-const child = spawn(cmd, cmdArgs, {
-  stdio: ["pipe", "pipe", "inherit"],
-  env: process.env,
-});
-
-child.on("error", (err: Error) => {
-  process.stderr.write(`[mcp-redact-proxy] spawn error: ${err.message}\n`);
-  process.exit(127);
-});
-child.on("exit", (code) => {
-  process.exit(code ?? 0);
-});
-
-/** JSON-RPC request IDs currently awaiting a `tools/call` response. */
-const pendingToolCalls = new Map<string | number, string>();
-
-// ── Client → Child ─────────────────────────────────────────────────────────
-const stdinRl = readline.createInterface({ input: process.stdin });
-stdinRl.on("line", (line: string) => {
-  // Passthrough first: the child must never be blocked on parsing delays.
-  child.stdin.write(line + "\n");
-
-  // Best-effort sniff to remember which request ids are tool calls.
-  try {
-    const msg = JSON.parse(line) as {
-      method?: string;
-      id?: string | number;
-      params?: { name?: string };
-    };
-    if (
-      msg?.method === "tools/call" &&
-      (typeof msg.id === "string" || typeof msg.id === "number") &&
-      typeof msg.params?.name === "string"
-    ) {
-      pendingToolCalls.set(msg.id, msg.params.name);
-    }
-  } catch {
-    // Non-JSON lines (shouldn't happen on MCP stdio, but be robust).
+function parseFlag(
+  args: readonly string[],
+  name: "--http-upstream" | "--http-host" | "--http-port",
+): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === name) return args[i + 1];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
   }
-});
-stdinRl.on("close", () => {
-  child.stdin.end();
-});
+  return undefined;
+}
 
-// ── Child → Client ─────────────────────────────────────────────────────────
-const stdoutRl = readline.createInterface({ input: child.stdout });
-stdoutRl.on("line", (line: string) => {
+function runHttpProxyMode(argv: readonly string[]) {
+  const upstreamRaw = parseFlag(argv, "--http-upstream");
+  if (!upstreamRaw) return false;
+
+  const host = parseFlag(argv, "--http-host") ?? "0.0.0.0";
+  const portRaw = parseFlag(argv, "--http-port") ?? "8080";
+  const port = Number(portRaw);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    process.stderr.write(
+      "error: --http-port must be an integer between 1 and 65535\n",
+    );
+    process.exit(2);
+  }
+
+  let upstream: URL;
   try {
-    const msg = JSON.parse(line) as {
-      id?: string | number;
-      result?: unknown;
-    };
+    upstream = new URL(upstreamRaw);
+    if (upstream.protocol !== "http:") {
+      throw new Error("only http upstream is supported");
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "invalid URL";
+    process.stderr.write(`error: invalid --http-upstream: ${msg}\n`);
+    process.exit(2);
+  }
 
-    if (
-      msg &&
-      (typeof msg.id === "string" || typeof msg.id === "number") &&
-      pendingToolCalls.has(msg.id)
-    ) {
-      const toolName = pendingToolCalls.get(msg.id)!;
-      pendingToolCalls.delete(msg.id);
+  const server = createHttpProxyServer({
+    host,
+    port,
+    upstream: upstream.toString(),
+  });
+  server.listen(port, host, () => {
+    process.stderr.write(
+      `[mcp-redact-proxy] HTTP proxy listening on http://${host}:${port} -> ${upstream.toString()}\n`,
+    );
+  });
+  server.on("error", (err: Error) => {
+    process.stderr.write(`[mcp-redact-proxy] http server error: ${err.message}\n`);
+    process.exit(1);
+  });
+  return true;
+}
 
-      const stats = makeStats();
-      msg.result = redactMcpToolResult(msg.result, rules, stats);
+function runStdioProxyMode(argv: readonly string[]) {
+  const sepIdx = argv.indexOf("--");
+  if (sepIdx < 0 || sepIdx === argv.length - 1) {
+    process.stderr.write(
+      "usage: mcp-redact-proxy [--http-upstream <url> [--http-host <host>] [--http-port <port>]] -- <inner-mcp-cmd> [args...]\n",
+    );
+    process.exit(2);
+  }
+  const innerArgv = argv.slice(sepIdx + 1);
+  const [cmd, ...cmdArgs] = innerArgv;
+  if (!cmd) {
+    process.stderr.write("error: no inner command specified after --\n");
+    process.exit(2);
+  }
 
-      if (stats.totalMatches > 0) {
-        process.stderr.write(
-          `[mcp-redact-proxy] tool=${toolName} redacted=${
-            stats.totalMatches
-          } by=${JSON.stringify(stats.byRule)}\n`,
-        );
+  const rules = DEFAULT_RULES;
+  const child = spawn(cmd, cmdArgs, {
+    stdio: ["pipe", "pipe", "inherit"],
+    env: process.env,
+  });
+
+  child.on("error", (err: Error) => {
+    process.stderr.write(`[mcp-redact-proxy] spawn error: ${err.message}\n`);
+    process.exit(127);
+  });
+  child.on("exit", (code) => {
+    process.exit(code ?? 0);
+  });
+
+  const pendingToolCalls = new Map<string | number, string>();
+
+  const stdinRl = readline.createInterface({ input: process.stdin });
+  stdinRl.on("line", (line: string) => {
+    child.stdin.write(line + "\n");
+
+    try {
+      const msg = JSON.parse(line) as {
+        method?: string;
+        id?: string | number;
+        params?: { name?: string };
+      };
+      if (
+        msg?.method === "tools/call" &&
+        (typeof msg.id === "string" || typeof msg.id === "number") &&
+        typeof msg.params?.name === "string"
+      ) {
+        pendingToolCalls.set(msg.id, msg.params.name);
       }
-      process.stdout.write(JSON.stringify(msg) + "\n");
-      return;
+    } catch {
+      // keep passthrough behavior for malformed lines
     }
-    process.stdout.write(line + "\n");
-  } catch {
-    process.stdout.write(line + "\n");
-  }
-});
-stdoutRl.on("close", () => {
-  // Child closed stdout → we're done.
-  process.stdout.end();
-});
+  });
+  stdinRl.on("close", () => {
+    child.stdin.end();
+  });
+
+  const stdoutRl = readline.createInterface({ input: child.stdout });
+  stdoutRl.on("line", (line: string) => {
+    try {
+      const msg = JSON.parse(line) as {
+        id?: string | number;
+        result?: unknown;
+      };
+      if (
+        msg &&
+        (typeof msg.id === "string" || typeof msg.id === "number") &&
+        pendingToolCalls.has(msg.id)
+      ) {
+        const toolName = pendingToolCalls.get(msg.id)!;
+        pendingToolCalls.delete(msg.id);
+        const stats = makeStats();
+        msg.result = redactMcpToolResult(msg.result, rules, stats);
+        if (stats.totalMatches > 0) {
+          process.stderr.write(
+            `[mcp-redact-proxy] tool=${toolName} redacted=${
+              stats.totalMatches
+            } by=${JSON.stringify(stats.byRule)}\n`,
+          );
+        }
+        process.stdout.write(JSON.stringify(msg) + "\n");
+        return;
+      }
+      process.stdout.write(line + "\n");
+    } catch {
+      process.stdout.write(line + "\n");
+    }
+  });
+  stdoutRl.on("close", () => {
+    process.stdout.end();
+  });
+}
+
+const argv = process.argv.slice(2);
+if (!runHttpProxyMode(argv)) {
+  runStdioProxyMode(argv);
+}

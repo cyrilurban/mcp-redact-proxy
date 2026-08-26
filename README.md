@@ -1,6 +1,6 @@
 # @qest/mcp-redact-proxy
 
-A tiny stdio proxy that sits between an MCP client (Claude Code, Cursor, VS Code extension, …) and any MCP server, and **redacts PII / secrets** from tool-call responses before they ever reach the LLM.
+A tiny proxy that can run in **stdio** mode or **HTTP** mode and **redacts PII / secrets** from MCP tool-call responses before they ever reach the LLM.
 
 Built out of a GDPR concern when wiring Claude Code into production Grafana/Loki queries. Written as defense-in-depth — the real fix is to never log PII in the first place (`pino.redact` + field whitelist at the logger), but until every service is audited this proxy gives you a safety net.
 
@@ -11,7 +11,7 @@ We evaluated [lasso-security/mcp-gateway](https://github.com/lasso-security/mcp-
 1. It builds dynamic Python functions from the inner MCP's tool schema, which crashes on tools with reserved words (`for` in Prometheus alerting) or hyphens (`filter-query` in Tempo search) in parameter names.
 2. The Presidio plugin is English-only out of the box and doesn't know about domain-specific identifiers we cared about.
 
-So this is ~200 lines of TypeScript doing exactly one thing: pipe JSON-RPC through, regex-redact the `tools/call` response payloads, nothing else.
+So this is ~200 lines of TypeScript doing exactly one thing: pipe JSON-RPC through, redact the `tools/call` response payloads, nothing else.
 
 ## What it redacts by default
 
@@ -55,11 +55,29 @@ npm i -g @qest/mcp-redact-proxy
 
 ## Usage
 
-Drop-in replacement for any MCP server command. Put `--` and then the original command:
+### Stdio mode (existing behavior)
+
+Drop-in replacement for any stdio MCP server command. Put `--` and then the original command:
 
 ```bash
 mcp-redact-proxy -- uvx mcp-grafana
 ```
+
+### HTTP mode (single upstream)
+
+Run as an HTTP proxy in front of one MCP HTTP server:
+
+```bash
+mcp-redact-proxy --http-upstream http://127.0.0.1:9090 --http-port 8080
+```
+
+Options:
+
+- `--http-upstream` (required for HTTP mode): upstream MCP HTTP base URL
+- `--http-port`: local listen port (default `8080`)
+- `--http-host`: local listen host (default `0.0.0.0`)
+
+In HTTP mode, requests and headers are passed through transparently, and `tools/call` responses are redacted using the same default rules.
 
 ### Claude Code / VS Code extension
 
@@ -125,6 +143,8 @@ yarn test           # vitest
 yarn test:watch
 yarn build          # tsc → dist/
 yarn dev -- uvx mcp-grafana  # run against a real MCP
+# HTTP mode:
+yarn dev -- --http-upstream http://127.0.0.1:9090 --http-port 8080
 ```
 
 ## License
