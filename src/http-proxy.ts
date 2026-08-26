@@ -94,7 +94,22 @@ export function createHttpProxyServer(options: HttpProxyOptions) {
     });
     if (requestBody === null) return;
 
-    const url = new URL(req.url ?? "/", upstreamBase);
+    let incomingUrl: URL;
+    try {
+      incomingUrl = new URL(req.url ?? "/", "http://proxy.local");
+    } catch {
+      writeJsonError(
+        res,
+        400,
+        "Invalid request URL",
+        "Unable to parse incoming request target",
+      );
+      return;
+    }
+    const url = new URL(
+      `${incomingUrl.pathname}${incomingUrl.search}`,
+      upstreamBase,
+    );
     const headers = new Headers();
     for (const [key, value] of Object.entries(req.headers)) {
       if (key.toLowerCase() === "host" || value === undefined) continue;
