@@ -113,7 +113,7 @@ export function createHttpProxyServer(options: HttpProxyOptions) {
         body:
           req.method === "GET" || req.method === "HEAD"
             ? undefined
-            : requestBody,
+            : new Uint8Array(requestBody),
         redirect: "manual",
       });
     } catch (err) {
