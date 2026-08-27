@@ -190,6 +190,7 @@ export const DEFAULT_RULES: readonly RedactionRule[] = [
     kind: "field",
     name: "name-field",
     fields: [
+      "uname",
       "name",
       "contactName",
       "name2",
