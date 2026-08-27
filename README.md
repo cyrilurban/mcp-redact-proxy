@@ -76,8 +76,26 @@ Options:
 - `--http-upstream` (required for HTTP mode): upstream MCP HTTP base URL
 - `--http-port`: local listen port (default `8080`)
 - `--http-host`: local listen host (default `0.0.0.0`)
+- `--unwrap-json-strings` (or `MCP_REDACT_UNWRAP_JSON_STRINGS=1`): also parse and redact JSON documents embedded inside string fields (e.g. a log line serialised into a `line` property), then re-serialise them back. Off by default; also available in stdio mode.
 
 In HTTP mode, requests and headers are passed through transparently, and `tools/call` responses are redacted using the same default rules.
+
+### Docker (HTTP mode)
+
+Build the image from the repository root:
+
+```bash
+docker build -t mcp-redact-proxy .
+```
+
+Run it on the same Docker network as the upstream MCP server:
+
+```bash
+docker run --rm -p 8080:8080 --network mcp-network mcp-redact-proxy \
+  --http-upstream http://mcp-server:9090
+```
+
+The proxy listens on port `8080` by default. Pass `--http-port` to change its internal listen port and publish the matching port with `-p`.
 
 ### Claude Code / VS Code extension
 

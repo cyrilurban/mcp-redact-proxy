@@ -14,6 +14,30 @@ export function makeStats(): RedactionStats {
   return { totalMatches: 0, byRule: {} };
 }
 
+export type RedactOptions = {
+  /**
+   * When true, string leaves that look like an embedded JSON object/array
+   * (e.g. a log line serialised into a string field) are parsed, redacted
+   * recursively, and re-serialised back into the string. Off by default.
+   */
+  unwrapJsonStrings?: boolean;
+};
+
+/**
+ * Parse `text` as a JSON object/array if it looks like one, otherwise return
+ * undefined. Used to detect JSON documents embedded as string values.
+ */
+function tryParseJsonContainer(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function bumpStat(stats: RedactionStats | undefined, name: string, by = 1) {
   if (!stats || by === 0) return;
   stats.byRule[name] = (stats.byRule[name] ?? 0) + by;
@@ -171,6 +195,7 @@ export function redactJson(
   stats?: RedactionStats,
   parentKey?: string,
   parentPath: readonly string[] = [],
+  options: RedactOptions = {},
 ): unknown {
   // 1) Path-rule short-circuit.
   for (const rule of rules) {
@@ -192,17 +217,31 @@ export function redactJson(
 
   // 3) Descend / apply string rules to leaves.
   if (typeof value === "string") {
+    if (options.unwrapJsonStrings) {
+      const embedded = tryParseJsonContainer(value);
+      if (embedded !== undefined) {
+        const redacted = redactJson(
+          embedded,
+          rules,
+          stats,
+          undefined,
+          parentPath,
+          options,
+        );
+        return JSON.stringify(redacted);
+      }
+    }
     return redactText(value, rules, stats);
   }
   if (Array.isArray(value)) {
     return value.map((v, i) =>
-      redactJson(v, rules, stats, undefined, [...parentPath, String(i)]),
+      redactJson(v, rules, stats, undefined, [...parentPath, String(i)], options),
     );
   }
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = redactJson(v, rules, stats, k, [...parentPath, k]);
+      out[k] = redactJson(v, rules, stats, k, [...parentPath, k], options);
     }
     return out;
   }
@@ -226,13 +265,14 @@ export function redactMcpToolResult(
   result: unknown,
   rules: readonly RedactionRule[],
   stats?: RedactionStats,
+  options: RedactOptions = {},
 ): unknown {
   if (
     result === null ||
     typeof result !== "object" ||
     !Array.isArray((result as { content?: unknown }).content)
   ) {
-    return redactJson(result, rules, stats);
+    return redactJson(result, rules, stats, undefined, [], options);
   }
 
   const envelope = result as Record<string, unknown> & { content: unknown[] };
@@ -248,7 +288,14 @@ export function redactMcpToolResult(
       if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
         try {
           const parsed = JSON.parse(text);
-          const redacted = redactJson(parsed, rules, stats);
+          const redacted = redactJson(
+            parsed,
+            rules,
+            stats,
+            undefined,
+            [],
+            options,
+          );
           return { ...(block as object), text: JSON.stringify(redacted, null, 2) };
         } catch {
           // fall through to string-leaf redaction
@@ -256,7 +303,7 @@ export function redactMcpToolResult(
       }
       return { ...(block as object), text: redactText(text, rules, stats) };
     }
-    return redactJson(block, rules, stats);
+    return redactJson(block, rules, stats, undefined, [], options);
   });
 
   // Walk the rest of the envelope (e.g. `isError`, `structuredContent`) so
@@ -266,7 +313,7 @@ export function redactMcpToolResult(
     if (k === "content") {
       redactedEnvelope[k] = newContent;
     } else {
-      redactedEnvelope[k] = redactJson(v, rules, stats, k);
+      redactedEnvelope[k] = redactJson(v, rules, stats, k, [k], options);
     }
   }
   return redactedEnvelope;

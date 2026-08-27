@@ -333,6 +333,34 @@ describe("redactJson — structural recursion", () => {
     expect(out.a.contactName).toBe(out.b.contactName);
     expect(out.a.contactName).not.toBe(out.c.contactName);
   });
+
+  it("leaves JSON embedded in a string leaf untouched by default", () => {
+    const input = {
+      line: JSON.stringify({ msg: "hello", uname: "jsmith" }),
+    };
+    const out = redactJson(input, DEFAULT_RULES) as typeof input;
+    expect(out.line).toBe(input.line);
+  });
+
+  it("unwrapJsonStrings option parses, redacts, and re-serialises embedded JSON", () => {
+    const input = {
+      line: JSON.stringify({ msg: "hello", uname: "jsmith" }),
+    };
+    const out = redactJson(input, DEFAULT_RULES, undefined, undefined, [], {
+      unwrapJsonStrings: true,
+    }) as typeof input;
+    const parsedBack = JSON.parse(out.line) as { msg: string; uname: string };
+    expect(parsedBack.msg).toBe("hello");
+    expect(parsedBack.uname).toMatch(/^<NAME_[a-f0-9]{6}>$/);
+  });
+
+  it("unwrapJsonStrings option leaves plain (non-JSON) strings untouched", () => {
+    const input = { description: "not json at all" };
+    const out = redactJson(input, DEFAULT_RULES, undefined, undefined, [], {
+      unwrapJsonStrings: true,
+    }) as typeof input;
+    expect(out.description).toBe("not json at all");
+  });
 });
 
 describe("redactMcpToolResult — MCP envelope handling", () => {

@@ -17,6 +17,16 @@ function parseFlag(
   return undefined;
 }
 
+/**
+ * Resolve the optional "unwrap JSON embedded in string fields" feature from
+ * a CLI flag or environment variable. Off by default.
+ */
+function resolveUnwrapJsonStrings(argv: readonly string[]): boolean {
+  if (argv.includes("--unwrap-json-strings")) return true;
+  const env = process.env.MCP_REDACT_UNWRAP_JSON_STRINGS;
+  return env === "1" || env?.toLowerCase() === "true";
+}
+
 function runHttpProxyMode(argv: readonly string[]) {
   const upstreamRaw = parseFlag(argv, "--http-upstream");
   if (!upstreamRaw) return false;
@@ -34,8 +44,8 @@ function runHttpProxyMode(argv: readonly string[]) {
   let upstream: URL;
   try {
     upstream = new URL(upstreamRaw);
-    if (upstream.protocol !== "http:") {
-      throw new Error("only http upstream is supported");
+    if (upstream.protocol !== "http:" && upstream.protocol !== "https:") {
+      throw new Error("only http(s) upstream is supported");
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "invalid URL";
@@ -47,6 +57,7 @@ function runHttpProxyMode(argv: readonly string[]) {
     host,
     port,
     upstream: upstream.toString(),
+    unwrapJsonStrings: resolveUnwrapJsonStrings(argv),
   });
   server.listen(port, host, () => {
     process.stderr.write(
@@ -76,6 +87,7 @@ function runStdioProxyMode(argv: readonly string[]) {
   }
 
   const rules = DEFAULT_RULES;
+  const unwrapJsonStrings = resolveUnwrapJsonStrings(argv);
   const child = spawn(cmd, cmdArgs, {
     stdio: ["pipe", "pipe", "inherit"],
     env: process.env,
@@ -131,7 +143,9 @@ function runStdioProxyMode(argv: readonly string[]) {
         const toolName = pendingToolCalls.get(msg.id)!;
         pendingToolCalls.delete(msg.id);
         const stats = makeStats();
-        msg.result = redactMcpToolResult(msg.result, rules, stats);
+        msg.result = redactMcpToolResult(msg.result, rules, stats, {
+          unwrapJsonStrings,
+        });
         if (stats.totalMatches > 0) {
           process.stderr.write(
             `[mcp-redact-proxy] tool=${toolName} redacted=${

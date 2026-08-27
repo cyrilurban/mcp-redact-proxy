@@ -125,4 +125,118 @@ describe("HTTP proxy mode", () => {
       await closeServer(upstream);
     }
   });
+
+  it("returns 502 when the upstream response body terminates", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).startsWith("https://upstream.example")) {
+        return {
+          status: 200,
+          headers: new Headers(),
+          arrayBuffer: async () => {
+            throw new TypeError("terminated");
+          },
+        } as Response;
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const proxy = createHttpProxyServer({
+      host: "127.0.0.1",
+      port: 0,
+      upstream: "https://upstream.example/mcp",
+    });
+    const proxyPort = await listenRandom(proxy);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" }),
+      });
+
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Upstream response failed");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await closeServer(proxy);
+    }
+  });
+
+  it("exposes /metrics endpoint with Prometheus format", async () => {
+    let upstreamCallCount = 0;
+    const upstream = createServer(async (req, res) => {
+      upstreamCallCount++;
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  email: "test@example.com",
+                  uuid: "f3623e55-5b76-4c1b-b045-89ea36c71978",
+                }),
+              },
+            ],
+          },
+        }),
+      );
+    });
+    const upstreamPort = await listenRandom(upstream);
+
+    const proxy = createHttpProxyServer({
+      host: "127.0.0.1",
+      port: 0,
+      upstream: `http://127.0.0.1:${upstreamPort}`,
+    });
+    const proxyPort = await listenRandom(proxy);
+
+    try {
+      // Make a tool call
+      await fetch(`http://127.0.0.1:${proxyPort}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "query_logs", arguments: {} },
+        }),
+      });
+
+      // Fetch metrics
+      const response = await fetch(`http://127.0.0.1:${proxyPort}/metrics`, {
+        method: "GET",
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(
+        "text/plain; charset=utf-8; version=0.0.4",
+      );
+
+      const text = await response.text();
+      // Check for Prometheus format elements
+      expect(text).toContain("# HELP mcp_redact_requests_total");
+      expect(text).toContain("# TYPE mcp_redact_requests_total counter");
+      expect(text).toContain("mcp_redact_requests_total 1");
+
+      expect(text).toContain("# HELP mcp_redact_tool_calls_total");
+      expect(text).toContain("mcp_redact_tool_calls_total 1");
+
+      expect(text).toContain("# HELP mcp_redact_redactions_total");
+      expect(text).toContain("mcp_redact_redactions_total 2"); // email + uuid
+
+      expect(text).toContain("# HELP mcp_redact_rule_redactions_total");
+      expect(text).toContain('mcp_redact_rule_redactions_total{rule="email"} 1');
+      expect(text).toContain('mcp_redact_rule_redactions_total{rule="uuid"} 1');
+    } finally {
+      await closeServer(proxy);
+      await closeServer(upstream);
+    }
+  });
 });
